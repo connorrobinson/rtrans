@@ -5,62 +5,88 @@ import glob, os
 import os
 
 
-
-
 def rtrans():
     '''
     PURPOSE:
-    Does radiative transfer for a collapsing cloud
+    Does radiative transfer for a collapsing cloud.
+
+    Currently not finished with the radiative transfer part here
+    Also need to fix the single temperature velocity calculation.
 
     '''
-    
+    #Define parameters
+
+    #Resolution elements along radius of cloud
     size = 11
+
+    #Molecule
     mole = 'co'
     massmole = 28*1.67e-24#g
+
+    #Central H2 number density of cloud
     nc = 1e3#cm^-3
+
+    #Radius of cloud
     rc = 1#pc
-    abundance = 1e-15#molecules/H2
 
+    #Xfactor of molecule to H2
+    abundance = 1e-5#molecules/H2
 
-    nures = 100
-    nu_0 = 115e9#Hz (Using CO1-0
+    #Inner outer temperature and power law coefficient
+    Tin = 100#K
+    Tout = 10#K
+    gamma = 2 #Power on 
 
+    #Spectral information
+    nures = 11 #Range of velocities in km/s
+    delvel =.1 #Bin size 
+    nu_0 = 115e9#Hz (Using CO1-0)
 
+    #Turbulant velocity
+    vturb = 2e5#cm/s
+    
+    #T background (CMBR)
+    T0 = 2.73#K
+    
+    
+    #Set up velocity array
+    velrange = np.arange(0, nures, delvel)*1e5
+    velrange = velrange - np.mean(velrange)
+
+    
     #Set up coordinates
     b = np.tile(np.arange(size), (size,1))
     x = np.transpose(b)
     r = np.sqrt(b**2 + x**2)
 
-    T = Tfunc(r, power = 2)
+    #Get the density
     den = denfunc(r, nc = nc, rc = rc, abundance = abundance)
     n = den[0]
     N = den[1]
-
+    
     Rout = len(r)-1
     
-    quad = makemap(size, mole, nc, rc, abundance)
+    quad = makemap(size, mole, nc, rc, abundance, Tin, Tout, gamma)
 
-    #Flips and copies the tau map
+    #Get tau, T and vel on both sides of the cloud
+
+    sphere = -(r-size+1)>0
+    spheremap = np.hstack((sphere[:,::-1], sphere))
+
     taumap = np.hstack((quad[:,::-1], quad))
 
-    vel = makevel(r, n, rc)
-    velmap = np.hstack((-vel[:,::-1], vel))
+    vel = makevel(massmole, Tin, Tout, gamma, size)
+    velmap = np.hstack((-vel[:,::-1], vel))*spheremap
 
-    T = Tfunc(r, power = 2)
-    Tmap = np.hstack((T[:,::-1], T))
+    T = Tfunc(r, gamma, Tin, Tout)
+    Tmap = np.hstack((T[:,::-1], T))*spheremap
+
+    #Transform the tau map into gaussian line profiles with velocities associated with the collapse
+    taunu = gauss(taumap, Tmap, velmap, nu_0,  massmole, velrange, vturb = vturb)
 
     
-
-    delvel =1
-
-    velrange = np.arange(0, nures, delvel)
-
-    gauss(taumap, Tmap, velmap, nu_0,  massmole, velrange)
     
-    #Get tau as a function of nu via velocity
-    
-    
-def gauss(tau, T, v, nu_0, massmole, velrange):
+def gauss(tau, T, v, nu_0, massmole, velrange, vturb):
     '''
     PURPOSE:
 
@@ -68,15 +94,16 @@ def gauss(tau, T, v, nu_0, massmole, velrange):
 
     INPUTS:
 
-    tau: Array of tau. Not yet a function of nu
+    tau: Array of tau. (Not yet a function of nu)
 
     T: Array of temperatures in the cloud
 
-    v: Array of radial velocities in the cloud
+    massmole: Mass of the emitting molecule
 
-    nures: Resolution of the spectra
+    velrange: Array of velocity space to calculate line profiles
 
-    nu_0: Rest value of nu
+    vturb: turbulant velocity, in cm/s
+    
 
     OUTPUTS:
 
@@ -85,19 +112,21 @@ def gauss(tau, T, v, nu_0, massmole, velrange):
     '''
 
     k = 1.38e-16#cgs units
-    
-    pdb.set_trace()
-    
+     
     taunu = np.zeros((np.shape(tau)[0], np.shape(tau)[1], len(velrange)))
 
-    vtherm = np.sqrt(2*k*T/massmole) 
-    
-    for t,index in self.tau.flat:      
-        taunu(index) = 1/(vtherm(index)*sqrt(np.pi)) * np.exp()
-    
-    
-    
-    
+    #Calculate the Dopler velocity
+    vtherm = np.sqrt(2*k*T/massmole)
+    vdop = np.sqrt(vtherm**2 + vturb**2)
+
+    #Calculate the velocity bin size
+    vbin = velrange[1]-velrange[0]
+
+    for i in np.arange(np.shape(tau)[0]):
+        for j in np.arange(np.shape(tau)[1]):
+            taunu[i,j,:] = tau[i,j] * vbin/(vdop[i,j]*np.sqrt(np.pi)) * np.exp(-(velrange - v[i,j])**2/(vdop[i,j]**2))
+            
+    return taunu
 
 def Inuout(Iin, tau, T, nu):
     '''
@@ -132,7 +161,7 @@ def Bnu(T, nu):
 
     return B
 
-def makemap(size, mole, nc, rc, abundance):
+def makemap(size, mole, nc, rc, abundance, Tin, Tout, power):
 
     '''
     PURPOSE:
@@ -156,7 +185,8 @@ def makemap(size, mole, nc, rc, abundance):
 
 
     #Calculate density and temperature
-    T = Tfunc(r, power = 2)
+    T = Tfunc(r, power, Tin, Tout)
+
     
     den = denfunc(r, nc = nc, rc = rc, abundance = abundance)
     n = den[0]
@@ -177,42 +207,41 @@ def makemap(size, mole, nc, rc, abundance):
     sphere = -(r-size+1)>0
 
     return tau*sphere
+                                                            
+def makevel(m_mol, T_in, T_out, gamma, size):
+    k = 1.38e-16
+#    m_mol = 28*1.67e-24
+#    T_in = 100
+#    T_out = 10
+#    gamma = 2
+
+
+    r_max = np.sqrt(size**2+size**2)
+    vel_arr = np.zeros((size,size))
+
+    for i in range(0,size):
+        for j in range(1,size):
+            r = np.sqrt(i**2+j**2)
+            vel_arr[i,j] = vel_rad(vel(r/r_max,m_mol,T_in,T_out,gamma),j,i)
+    return vel_arr
+
+
+def vel(r,m_mol,T_in,T_out,gamma):
+
+    # r is in units of cloud radius
+    k = 1.38e-16
+    v = np.sqrt(-(4*k/m_mol)*(T_in*np.log(r)+((T_in-T_out)/(gamma*(gamma+1)))*(r**gamma-1)))
+    #NOTE: NEED TO MAKE CHANGE FOR GAMMA = 0 CASE
     
-def makevel(r, n, rc):
-    '''
-    PURPOSE:
-    
-    Makes an array of free fall velocities for a collapsing sphere
+    return(v)
 
-    INPUT:
+def vel_rad(v_center,x,b):
 
-    r: Array with the values of r in index coordinates
+    r = np.sqrt(x**2+b**2)
+    v_rad = v_center*x/r
+    return(v_rad)
 
-    rc: Radius of the cloud
-    
 
-    OUTPUT:
-    
-    Array containing the velocity at each location
-    
-
-    '''
-
-    Rout = len(r)-1
-
-    pc = 3.09e18#m/pc
-    mh = 1.67e-24#g
-    mu = 2.3# Assuming molecular cloud
-    
-    G = 6.67e-8#m^3/(kg s^2)
-
-    l = (rc * pc)/Rout
-
-    M = np.sum((l**3) * (n) * mh*mu)
-
-    v = np.sqrt(2*G*M*(1/(r*l) - 1/(Rout*l)))
-
-    return v
 
 def extract(r,size,mole,path):
     '''
@@ -307,7 +336,7 @@ def denfunc(r, nc, rc, abundance):
     return (n,N)
     
 
-def Tfunc(r, power = 2, Tin=100, Tout=10, constant = False):
+def Tfunc(r, power, Tin, Tout, constant = False):
 
     '''
     PURPOSE:
@@ -339,8 +368,6 @@ def Tfunc(r, power = 2, Tin=100, Tout=10, constant = False):
     return T
     
 
-
-    
 def input(mole,tkin,N,den,b,x,path, trad = 2.73):
 
     '''
