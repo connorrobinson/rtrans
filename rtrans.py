@@ -84,7 +84,7 @@ def rtrans():
     #Transform the tau map into gaussian line profiles with velocities associated with the collapse
     taunu = gauss(taumap, Tmap, velmap, nu_0,  massmole, velrange, vturb = vturb)
 
-    
+    pdb.set_trace()
     
 def gauss(tau, T, v, nu_0, massmole, velrange, vturb):
     '''
