@@ -3,6 +3,8 @@ import pdb
 import matplotlib.pyplot as plt
 import glob, os
 import os
+import copy
+from progress.bar import Bar
 
 
 def rtrans():
@@ -17,43 +19,49 @@ def rtrans():
     #Define parameters
 
     #Resolution elements along radius of cloud
-    size = 11
+    size = 50
 
     #Molecule
-    mole = 'co'
+    mole = 'co' #Other available options:  'n2h+','hco+'
     massmole = 28*1.67e-24#g
-
+    nu_0 = 115e9#Hz (Using CO1-0)
+    abundance = 1e-5#( of molecules)/(# of H2)
+    
     #Central H2 number density of cloud
     nc = 1e3#cm^-3
 
     #Radius of cloud
     rc = 1#pc
 
-    #Xfactor of molecule to H2
-    abundance = 1e-5#molecules/H2
 
     #Inner outer temperature and power law coefficient
     Tin = 100#K
     Tout = 10#K
     gamma = 2 #Power on 
 
+
+    #Switch to turn central source on/off
+    source = 'True'
+    
     #Spectral information
     nures = 11 #Range of velocities in km/s
     delvel =.1 #Bin size 
-    nu_0 = 115e9#Hz (Using CO1-0)
+
 
     #Turbulant velocity
-    vturb = 2e5#cm/s
+    vturb = 2e3#cm/s
     
     #T background (CMBR)
     T0 = 2.73#K
-    
+
+    c = 3e10 #cm/s
     
     #Set up velocity array
     velrange = np.arange(0, nures, delvel)*1e5
     velrange = velrange - np.mean(velrange)
 
-    
+    velnum = len(velrange)
+
     #Set up coordinates
     b = np.tile(np.arange(size), (size,1))
     x = np.transpose(b)
@@ -64,27 +72,113 @@ def rtrans():
     n = den[0]
     N = den[1]
     
-    Rout = len(r)-1
-    
-    quad = makemap(size, mole, nc, rc, abundance, Tin, Tout, gamma)
+    Trad = np.zeros(size)+T0
 
     #Get tau, T and vel on both sides of the cloud
-
     sphere = -(r-size+1)>0
     spheremap = np.hstack((sphere[:,::-1], sphere))
-
-    taumap = np.hstack((quad[:,::-1], quad))
 
     vel = makevel(massmole, Tin, Tout, gamma, size)
     velmap = np.hstack((-vel[:,::-1], vel))*spheremap
 
     T = Tfunc(r, gamma, Tin, Tout)
     Tmap = np.hstack((T[:,::-1], T))*spheremap
+    
+    #Set up initial intensity
+    freq = nu_0 * velrange/c + nu_0
+    I0 = Bnu(T0, freq)
 
-    #Transform the tau map into gaussian line profiles with velocities associated with the collapse
-    taunu = gauss(taumap, Tmap, velmap, nu_0,  massmole, velrange, vturb = vturb)
+    #Set up arrays
+    freqarr = np.tile(freq, (size,1))
+    Icol = np.tile(I0, (size,1))
+    
+    taucol,Texcol = makemap(size, mole, nc, rc, abundance, Tin, Tout, gamma, -size, Trad)
 
+
+    #Set up progress bar
+    bar = Bar('Radiative transfer', max=size*2)
+
+    for ind in np.arange(size*2):
+
+        
+        xind = ind-size
+        
+        #If excitation temp is 0, set background temp
+        Texcol = Texcol + (Texcol == 0)*T0
+
+        if ind == size:
+            Texcol[0] = 5800#k
+            
+        
+        #Compute tau and Tex
+        taucol, Texcol = makemap(size, mole, nc, rc, abundance, Tin, Tout, gamma, xind, Texcol)
+        
+        Texcol = Texcol + (Texcol == 0)*T0
+        
+        Texarr = np.transpose(np.tile(Texcol, (velnum,1)))
+
+        #Compute tau at each velocity bin
+        taunu = gauss(taucol, Tmap[:,ind], velmap[:,ind], nu_0, massmole, velrange, vturb = vturb)
+
+
+        if ind == size:
+
+            Icore = copy.copy(Icol[0])
+            Icol[0] = Icore + Bnu(5800, freq)
+        
+
+        Itemp = copy.copy(Icol)
+        
+        Icol = Itemp*np.exp(-taunu)+Bnu(Texarr,freqarr)*(1-np.exp(-taunu))
+        
+        bar.next()
+
+    bar.finish()
+
+    
+    totvel = np.vstack((velmap[::-1,:],velmap))
+   
+    #Radial Velocity plert
+    plt.pcolor(totvel/(1e5))
+    cbar = plt.colorbar()
+    cbar.set_label('Velocity [km/s]')
+    plt.xlabel('X Position [Resolution Elements]')
+    plt.ylabel('Y Position [Resolution Elements]')
+    plt.savefig('/Users/connorr/Desktop/rtrans/plots/RVplot.eps')
+
+    #Temperate Profile plot
+    
+    totT = np.vstack((Tmap[::-1,:],Tmap))
+
+    plt.pcolor(totT)
+    cbar = plt.colorbar()
+    cbar.set_label('Kinetic Temperature [K]')
+    plt.xlabel('X Position [Resolution Elements]')
+    plt.ylabel('Y Position [Resolution Elements]')
+    plt.savefig('/Users/connorr/Desktop/rtrans/plots/Tprof.eps')
+
+
+    #Number density
+    ncor = n*sphere
+    nmap = np.hstack((ncor[:,::-1], ncor))
+    totn = np.vstack((nmap[::-1,:],nmap))
+
+    plt.pcolor(totn)
+    cbar = plt.colorbar()
+    cbar.set_label(r'Number Density [cm$^{-3}$]')
+    plt.xlabel('X Position [Resolution Elements]')
+    plt.ylabel('Y Position [Resolution Elements]')
+    plt.savefig('/Users/connorr/Desktop/rtrans/plots/nprof.eps')
+    
+    plt.show()
+    
     pdb.set_trace()
+
+    
+    return Icol        
+        
+
+
     
 def gauss(tau, T, v, nu_0, massmole, velrange, vturb):
     '''
@@ -113,7 +207,7 @@ def gauss(tau, T, v, nu_0, massmole, velrange, vturb):
 
     k = 1.38e-16#cgs units
      
-    taunu = np.zeros((np.shape(tau)[0], np.shape(tau)[1], len(velrange)))
+    taunu = np.zeros((np.shape(tau)[0], len(velrange)))
 
     #Calculate the Dopler velocity
     vtherm = np.sqrt(2*k*T/massmole)
@@ -123,8 +217,8 @@ def gauss(tau, T, v, nu_0, massmole, velrange, vturb):
     vbin = velrange[1]-velrange[0]
 
     for i in np.arange(np.shape(tau)[0]):
-        for j in np.arange(np.shape(tau)[1]):
-            taunu[i,j,:] = tau[i,j] * vbin/(vdop[i,j]*np.sqrt(np.pi)) * np.exp(-(velrange - v[i,j])**2/(vdop[i,j]**2))
+        #for j in np.arange(np.shape(tau)[1]):
+        taunu[i,:] = tau[i] * vbin/(vdop[i]*np.sqrt(np.pi)) * np.exp(-(velrange - v[i])**2/(vdop[i]**2))
             
     return taunu
 
@@ -161,7 +255,7 @@ def Bnu(T, nu):
 
     return B
 
-def makemap(size, mole, nc, rc, abundance, Tin, Tout, power):
+def makemap(length, mole, nc, rc, abundance, Tin, Tout, power, x, Trad):
 
     '''
     PURPOSE:
@@ -177,9 +271,7 @@ def makemap(size, mole, nc, rc, abundance, Tin, Tout, power):
     path = '/Users/connorr/Desktop/Radex/bin/jobfiles/'
 
     #Set up the grid
-    b = np.tile(np.arange(size), (size,1))
-
-    x = np.transpose(b)
+    b = np.arange(length)
 
     r = np.sqrt(b**2 + x**2)
 
@@ -193,28 +285,23 @@ def makemap(size, mole, nc, rc, abundance, Tin, Tout, power):
     N = den[1]
 
     #Make the job files
-    for bind in b[0]:
-        for xind in x[:,0]:
-            input(mole, T[xind, bind], N[xind, bind], n[xind, bind], bind, xind, path)
+    for bind in b:
+#        for xind in x[:,0]:
+        input(mole, T[bind], N[bind], n[bind], bind, x, path, Trad[bind])
 
     #Run the job files
     run(path = path)
 
-    tau = extract(r,size, mole, path)
+    tau,Tex = extract(r,length, mole, path)
 
 
     #Assume that tau = 0 outside of sphere    
-    sphere = -(r-size+1)>0
+    sphere = -(r-length+1)>0
 
-    return tau*sphere
+    return tau*sphere, Tex*sphere
                                                             
 def makevel(m_mol, T_in, T_out, gamma, size):
     k = 1.38e-16
-#    m_mol = 28*1.67e-24
-#    T_in = 100
-#    T_out = 10
-#    gamma = 2
-
 
     r_max = np.sqrt(size**2+size**2)
     vel_arr = np.zeros((size,size))
@@ -243,11 +330,11 @@ def vel_rad(v_center,x,b):
 
 
 
-def extract(r,size,mole,path):
+def extract(r,length,mole,path):
     '''
     PURPOSE:
     
-    Extracts tau from the jobfiles and then returns an array.
+    Extracts tau + Tex from the jobfiles and then returns an array.
     
     INPUTS:
     
@@ -274,28 +361,32 @@ def extract(r,size,mole,path):
 
     #Read in data
     unsorted = []
-    tau = np.zeros((size,size))
-
+    tau = np.zeros(length)
+    Tex = np.zeros(length)
+    
     #For now only grab the first line
     line = 0
-    
+
     for f in fnames:
         #Grab the impact parameter and x.
         bind = f.split(path+mole+'_')[1].split('_')[0]
-        xind = f.split(bind+'_')[1].split('.')[0]
+#        xind = f.split(bind+'_')[1].split('.')[0]
 
-        temptau =  np.loadtxt(f, skiprows = skip, usecols = [7])
-        tau[xind,bind] = temptau[line]
+        temptau = np.loadtxt(f, skiprows = skip, usecols = [7])
+        tempTex = np.loadtxt(f, skiprows = skip, usecols = [6])
+        tau[np.int(bind)] = temptau[line]
+        Tex[np.int(bind)] = tempTex[line]
+        
 
         #Remove the jobfiles
-        os.system('rm '+f)
-        os.system('rm '+f[0:-3]+'inp')
+        os.system('rm '+f+' 2>/dev/null')
+        os.system('rm '+f[0:-3]+'inp 2>/dev/null')
 
     #Remove all the files that did not run.
     #Note: If there are more than 10000 files this will fail.
-    os.system('rm '+path+'*inp')
+    os.system('rm '+path+'*inp 2>/dev/null')
 
-    return tau
+    return tau, Tex
     
 def denfunc(r, nc, rc, abundance):
 
@@ -368,7 +459,7 @@ def Tfunc(r, power, Tin, Tout, constant = False):
     return T
     
 
-def input(mole,tkin,N,den,b,x,path, trad = 2.73):
+def input(mole,tkin,N,den,b,x,path, trad):
 
     '''
     PURPOSE: 
@@ -405,12 +496,12 @@ def input(mole,tkin,N,den,b,x,path, trad = 2.73):
     places = 5    
     bzero = '0'*(places-len(bstr))+bstr
 
-    xstr = str(x)
+    xstr = str(abs(x))
     xzero = '0'*(places-len(xstr))+xstr
 
-    
+
     filename = mole+'_'+bzero+'_'+xzero
-    
+
     infile = open(path+filename+'.inp', 'w')
 
     #Set the range to look for lines for a specific molecule
@@ -420,7 +511,10 @@ def input(mole,tkin,N,den,b,x,path, trad = 2.73):
         minmax = ['10', '1000']
     elif mole == 'hcn':
         minmax = ['1','1400']
-    
+    elif mole == 'n2h+':
+        minmax = ['1','100']
+
+        
     Densci = "{:.2E}".format(den)
     Nsci = "{:.2E}".format(N)
         
@@ -442,9 +536,7 @@ def run(path):
     filelist = glob.glob(path+'*.inp')
 
     for file in filelist:
-
-        os.system('radex < '+file)
-        os.system('mv '+ os.getcwd()+'/'+str.split(file[0:-3],path)[1]+'out '+file[0:-3]+'out')
-        
+        os.system('radex < '+file+'> NUL 2>&1')
+        os.system('mv '+ os.getcwd()+'/'+str.split(file[0:-3],path)[1]+'out '+file[0:-3]+'out'+' 2>/dev/null')
 
 
